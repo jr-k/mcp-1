@@ -13,6 +13,8 @@ export type ToolFilters = {
 
 const SUPPORTED_METHODS = ['get', 'delete', 'post', 'put'];
 
+const VALID_PROPERTY_NAME = /^[a-zA-Z0-9_.-]{1,64}$/;
+
 type Tool = MCPTool & {
   inputSchema: {
     type: 'object';
@@ -39,6 +41,25 @@ type JsonSchema = {
 const trimSlashes = (str: string) => {
   return str.replace(/^\/+|\/+$/g, '');
 };
+
+/**
+ * Converts an API parameter name into a property name accepted by strict
+ * MCP clients (^[a-zA-Z0-9_.-]{1,64}$). e.g. `DateSent<` -> `DateSent_lt`
+ * @param name the original parameter name
+ */
+export function toPropertyName(name: string): string {
+  if (VALID_PROPERTY_NAME.test(name)) {
+    return name;
+  }
+
+  return name
+    .replace(/<=/g, '_lte')
+    .replace(/>=/g, '_gte')
+    .replace(/</g, '_lt')
+    .replace(/>/g, '_gt')
+    .replace(/[^a-zA-Z0-9_.-]/g, '_')
+    .slice(0, 64);
+}
 
 function toSchema(
   schema: OpenAPIV3.SchemaObject,
@@ -67,6 +88,33 @@ function toSchema(
   }
 
   return result;
+}
+
+/**
+ * Registers a property on the tool, sanitizing its name if needed
+ */
+function addProperty(
+  tool: Tool,
+  api: API,
+  originalName: string,
+  schema: OpenAPIV3.SchemaObject,
+  description: string,
+): string {
+  const propertyName = toPropertyName(originalName);
+  let finalDescription = description;
+  if (propertyName !== originalName) {
+    // eslint-disable-next-line no-param-reassign
+    api.paramAliases = { ...api.paramAliases, [propertyName]: originalName };
+    finalDescription = `${description} (Original parameter name: ${originalName})`;
+  }
+
+  // eslint-disable-next-line no-param-reassign
+  tool.inputSchema.properties[propertyName] = toSchema(
+    schema,
+    finalDescription,
+  );
+
+  return propertyName;
 }
 
 export default function loadTools(specs: OpenAPISpec[], filters?: ToolFilters) {
@@ -142,16 +190,24 @@ export default function loadTools(specs: OpenAPISpec[], filters?: ToolFilters) {
             if (operation.parameters) {
               operation.parameters
                 .filter((param) => 'name' in param && 'in' in param)
-                .forEach((param) => {
+                .forEach((p) => {
+                  const param = p as OpenAPIV3.ParameterObject;
                   const schema = param.schema as OpenAPIV3.SchemaObject;
 
-                  tool.inputSchema.properties[param.name] = toSchema(
-                    schema,
+                  const propertyName = addProperty(
+                    tool,
+                    api,
+                    param.name,
+                    schema ?? {},
                     param.description || `${param.name} parameter`,
                   );
 
+                  if (param.in === 'query') {
+                    api.queryParams = [...(api.queryParams ?? []), param.name];
+                  }
+
                   if (param.required) {
-                    tool.inputSchema.required.push(param.name);
+                    tool.inputSchema.required.push(propertyName);
                   }
                 });
             }
@@ -170,13 +226,18 @@ export default function loadTools(specs: OpenAPISpec[], filters?: ToolFilters) {
               const schema = content.schema as OpenAPIV3.SchemaObject;
 
               if (schema.required) {
-                tool.inputSchema.required.push(...schema.required);
+                tool.inputSchema.required.push(
+                  ...schema.required.map(toPropertyName),
+                );
               }
 
               if (schema.properties) {
                 Object.entries(schema.properties).forEach(([key, value]) => {
                   const property = value as OpenAPIV3.SchemaObject;
-                  tool.inputSchema.properties[key] = toSchema(
+                  addProperty(
+                    tool,
+                    api,
+                    key,
                     property,
                     property.description ?? `${key} parameter`,
                   );
