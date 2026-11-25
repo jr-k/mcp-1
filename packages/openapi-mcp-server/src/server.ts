@@ -42,6 +42,71 @@ export type OpenAPIMCPServerConfiguration = {
   authorization?: Authorization;
 };
 
+/**
+ * Restores the original API parameter names from the sanitized property names
+ * exposed in the tool input schema (e.g. `DateSent_lt` -> `DateSent<`)
+ * @param api the API definition
+ * @param body the arguments received from the client
+ */
+export function restoreParamNames(
+  api: API,
+  body: Record<string, unknown>,
+): Record<string, unknown> {
+  const aliases = api.paramAliases;
+  if (!aliases || Object.keys(aliases).length === 0) {
+    return body;
+  }
+
+  const restored: Record<string, unknown> = {};
+  Object.entries(body).forEach(([key, value]) => {
+    restored[aliases[key] ?? key] = value;
+  });
+
+  return restored;
+}
+
+/**
+ * Appends the declared query parameters of the API to the URL
+ * @param url the interpolated URL
+ * @param api the API definition
+ * @param body the request arguments
+ */
+export function appendQueryParams(
+  url: string,
+  api: API,
+  body?: Record<string, unknown>,
+): string {
+  if (!body || Array.isArray(body) || !api.queryParams?.length) {
+    return url;
+  }
+
+  const search = new URLSearchParams();
+  api.queryParams.forEach((key) => {
+    const value = body[key];
+    if (value === undefined || value === null || value === '') {
+      return;
+    }
+
+    const values = Array.isArray(value) ? value : [value];
+    values.forEach((item) => {
+      if (item === undefined || item === null) {
+        return;
+      }
+      search.append(
+        key,
+        typeof item === 'object' ? JSON.stringify(item) : String(item),
+      );
+    });
+  });
+
+  const query = search.toString();
+  if (!query) {
+    return url;
+  }
+
+  return `${url}${url.includes('?') ? '&' : '?'}${query}`;
+}
+
 export default class OpenAPIMCPServer {
   public readonly server: Server;
 
@@ -101,7 +166,7 @@ export default class OpenAPIMCPServer {
     };
 
     if (api.method === 'GET') {
-      return this.http.get(url, { headers });
+      return this.http.get(appendQueryParams(url, api, body), { headers });
     }
 
     if (api.method === 'POST') {
@@ -109,7 +174,7 @@ export default class OpenAPIMCPServer {
     }
 
     if (api.method === 'DELETE') {
-      return this.http.delete(url, { headers });
+      return this.http.delete(appendQueryParams(url, api, body), { headers });
     }
 
     throw new Error(`Unsupported method: ${api.method}`);
@@ -262,7 +327,7 @@ export default class OpenAPIMCPServer {
     if (!tool || !api) {
       throw new Error(`Tool (${id}) not found: ${name}`);
     }
-    const rawBody = request.params.arguments ?? {};
+    const rawBody = restoreParamNames(api, request.params.arguments ?? {});
     const body = this.callToolBody(tool, api, rawBody);
 
     const httpResponse = await this.makeRequest(id, api, body);
